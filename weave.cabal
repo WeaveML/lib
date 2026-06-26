@@ -19,7 +19,8 @@ library
     exposed-modules:  
       Weave.Base,
       Weave.Train,
-      Weave.Dataset
+      Weave.Dataset,
+      Weave.IO
 
     build-depends:    
       base ^>=4.20.2.0,
@@ -32,10 +33,13 @@ library
 executable weave-image 
     import:           warnings
     main-is:          Main.hs
+    other-modules:  CLI
     build-depends:
         base ^>=4.20.2.0,
         random,
         weave,
+        bytestring,
+        optparse-applicative,
         binary
 
     hs-source-dirs:   app
