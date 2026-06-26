@@ -19,7 +19,7 @@ main = do
   case cmd of
     Train numEpochs outputPath -> do
       putStr "Generation datasets... "
-      trainDataset <- generateDataset 1500 0.25
+      trainDataset <- generateDataset 1500 1 
       testDataset  <- generateDataset 300 0.25
       
       gen <- newStdGen

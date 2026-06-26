@@ -12,7 +12,7 @@ import Weave.Base ( Network(..)
 import Data.List (transpose)
 
 learningRate :: Double
-learningRate = 0.001 
+learningRate = 0.0002 
 
 reluDerivative :: Double -> Double 
 reluDerivative x = if x > 0 then 1.0 else 0.0
