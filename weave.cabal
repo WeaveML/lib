@@ -16,8 +16,15 @@ common warnings
 
 library
     import:           warnings
-    exposed-modules:  Weave.Base  
-    build-depends:    base ^>=4.20.2.0
+    exposed-modules:  
+      Weave.Base,
+      Weave.Train,
+      Weave.Dataset
+
+    build-depends:    
+      base ^>=4.20.2.0,
+      random
+
     hs-source-dirs:   src
     default-language: GHC2024
 

@@ -7,11 +7,13 @@ module Weave.Base
   , softMax 
   , Matrix
   , Vector 
+  , Image 
   , dot
   ) where
 
 type Vector = [Double]
 type Matrix = [Vector]
+type Image = (Vector, Int) 
 
 data Network = Network 
   { wHidden :: Matrix

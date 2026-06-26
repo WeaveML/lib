@@ -7,10 +7,9 @@ import Weave.Base ( Network(..)
                   , relu
                   , layerForward
                   , softMax
+                  , Image
                   )
 import Data.List (transpose)
-
-type Image = (Vector, Int)
 
 learningRate :: Double
 learningRate = 0.01 
