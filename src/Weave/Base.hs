@@ -11,10 +11,12 @@ module Weave.Base
   , Vector 
   , Image 
   , dot
+  , initRandomNetwork
   ) where
 
 import System.Random (StdGen, randomRs, split)
 import Data.Binary (Binary)
+import GHC.Generics (Generic)
 
 type Vector = [Double]
 type Matrix = [Vector]
