@@ -1,4 +1,14 @@
-module Weave.Base (Network(..), argMax, predict) where
+module Weave.Base 
+  ( Network(..)
+  , argMax
+  , predict
+  , layerForward
+  , relu 
+  , softMax 
+  , Matrix
+  , Vector 
+  , dot
+  ) where
 
 type Vector = [Double]
 type Matrix = [Vector]
