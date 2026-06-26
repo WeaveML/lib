@@ -1,0 +1,32 @@
+cabal-version:      3.14
+name:               weave
+version:            0.1.0.0
+description:        ML lib 
+homepage:           https://github.com/WeaveML/lib.git
+license:            MIT
+license-file:       LICENSE
+author:             ruzen42
+maintainer:         malledeferlive@gmail.com
+category:           Math
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:  Weave.Base  
+    build-depends:    base ^>=4.20.2.0
+    hs-source-dirs:   src
+    default-language: GHC2024
+
+executable weave-image 
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:
+        base ^>=4.20.2.0,
+        weave
+
+    hs-source-dirs:   app
+    default-language: GHC2024
