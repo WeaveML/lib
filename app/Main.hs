@@ -5,14 +5,6 @@ import Weave.Train
 import Weave.Dataset 
 import Control.Monad (forM_)
 
-dummyNet :: Network 
-dummyNet = Network 
-  { wHidden = replicate 64 $ replicate 784 0.01
-  , bHidden = replicate 64 0.1
-  , wOutput = replicate 10 $ replicate 64 0.02
-  , bOutput = replicate 10 0.1
-  }
-
 main :: IO ()
 main = do 
   dataset <- generateDataset 1000 0.25

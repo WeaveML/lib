@@ -1,3 +1,5 @@
+{-# LANGUAGE DeriveGeneric #-}
+
 module Weave.Base 
   ( Network(..)
   , argMax
@@ -11,6 +13,9 @@ module Weave.Base
   , dot
   ) where
 
+import System.Random (StdGen, randomRs, split)
+import Data.Binary (Binary)
+
 type Vector = [Double]
 type Matrix = [Vector]
 type Image = (Vector, Int) 
@@ -20,7 +25,29 @@ data Network = Network
   , bHidden :: Vector 
   , wOutput :: Matrix 
   , bOutput :: Vector
-  } deriving Show
+  } deriving (Show, Generic)
+
+instance Binary Network
+
+initRandomNetwork :: StdGen -> Network
+initRandomNetwork gen =
+  let (g1, tmp1) = split gen
+      (g2, tmp2) = split tmp1
+      (g3, g4)   = split tmp2
+      
+      randW1 = randomRs (-0.05, 0.05) g1
+      randW2 = randomRs (-0.05, 0.05) g2
+      
+      chunksOf :: Int -> [a] -> [[a]]
+      chunksOf _ [] = []
+      chunksOf n xs = take n xs : chunksOf n (drop n xs)
+      
+      wH = chunksOf 784 (take (64 * 784) randW1)
+      bH = replicate 64 0.0
+      
+      wO = chunksOf 64 (take (10 * 64) randW2)
+      bO = replicate 10 0.0
+  in Network wH bH wO bO
 
 -- scalar * vectors
 dot :: Vector -> Vector -> Double 
