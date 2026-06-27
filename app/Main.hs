@@ -1,8 +1,5 @@
 module Main (main) where
 
-import qualified Data.Vector.Unboxed as U
-import           Data.Vector.Unboxed ((!))
-
 import Weave.Base
 import Weave.Train
 import Weave.Dataset
@@ -13,6 +10,7 @@ import System.Random (newStdGen)
 import System.IO     (hSetBuffering, stdout, BufferMode(NoBuffering))
 import qualified Data.ByteString as B
 import Text.Printf   (printf)
+import Data.Vector.Unboxed ((!))
 
 main :: IO ()
 main = do
@@ -28,6 +26,20 @@ main = do
 
       gen <- newStdGen
       let initialNet = initRandomNetwork gen
+
+      putStrLn "Training..."
+      finalNet <- foldlMSteps initialNet [1..numEpochs] numEpochs trainDataset testDataset
+
+      printf "\nSaving model: %s... " outputPath
+      saveModel finalNet outputPath
+      putStrLn "done."
+    Update numEpochs outputPath -> do
+      putStrLn "Generating datasets... "
+      trainDataset <- generateDataset 1500 0.3
+      testDataset  <- generateDataset 300  0.15
+      putStrLn "done."
+
+      initialNet <- loadModel outputPath 
 
       putStrLn "Training..."
       finalNet <- foldlMSteps initialNet [1..numEpochs] numEpochs trainDataset testDataset
