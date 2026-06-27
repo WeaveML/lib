@@ -1,212 +1,243 @@
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE BangPatterns  #-}
 
 module Weave.Base
   ( Network(..)
-  , ConvFilter
-  , FeatureMap
-  , argMax
+  , UVec
+  , UMat         
+  , FMap          
   , predict
-  , relu
-  , softMax
+  , argMax
+  , relu, softMax
   , layerForward
   , dot
-  , Matrix
-  , Vector
-  , Image
-  , initRandomNetwork
-  , chunksOf
-  , conv2dSingle
-  , conv2d
-  , maxPool2x2
   , flatten
+  , conv2dSingle
   , applyFilters
+  , maxPool2x2
+  , initRandomNetwork
+  , chunksToFMap, fmapAdd
   , imgW, imgH
-  , after_pool1_h, after_pool1_w
-  , after_conv1_h, after_conv1_w
-  , after_conv2_h, after_conv2_w
-  , after_pool2_h, after_pool2_w
-  , conv1Filters, conv1KernelSize
-  , conv2Filters, conv2KernelSize
-  , fc1Size, numClasses, flatSize
+  , c1F, k1, c2F, k2
+  , fc1, nCls, flatSz
+  , outH1, outW1, pH1, pW1
+  , outH2, outW2, pH2, pW2
+  , Image, Vector
   ) where
 
-import System.Random (StdGen, randomRs, split)
-import Data.Binary (Binary)
-import GHC.Generics (Generic)
+import qualified Data.Vector.Unboxed         as U
+import           Data.Vector.Unboxed         ((!))
+import           System.Random               (StdGen, randomRs, split)
+import           Data.Binary                 (Binary(..))
+import           GHC.Generics                (Generic)
 
-type Vector     = [Double]
-type Matrix     = [Vector]
-type Image      = (Vector, Int)
-type FeatureMap = [[Double]]
-type ConvFilter = [[Double]]
+type UVec  = U.Vector Double
+type UMat  = (Int, Int, UVec)   
+type FMap  = (Int, Int, UVec)  
+
+type Vector = [Double]
+type Image  = (Vector, Int)
 
 imgW, imgH :: Int
-imgW = 100
-imgH = 100
+imgW = 100 ; imgH = 100
 
-conv1Filters, conv1KernelSize :: Int
-conv1Filters    = 8
-conv1KernelSize = 5
+c1F, k1 :: Int   
+c1F = 8  ; k1 = 5
 
-conv2Filters, conv2KernelSize :: Int
-conv2Filters    = 16
-conv2KernelSize = 3
+c2F, k2 :: Int  
+c2F = 16 ; k2 = 3
 
-fc1Size, numClasses :: Int
-fc1Size    = 128
-numClasses = 10
+fc1, nCls :: Int
+fc1 = 128 ; nCls = 10
 
-after_conv1_h, after_conv1_w :: Int
-after_conv1_h = imgH - conv1KernelSize + 1  
-after_conv1_w = imgW - conv1KernelSize + 1  
+outH1, outW1 :: Int          
+outH1 = imgH - k1 + 1       
+outW1 = imgW - k1 + 1      
 
-after_pool1_h, after_pool1_w :: Int
-after_pool1_h = after_conv1_h `div` 2  
-after_pool1_w = after_conv1_w `div` 2  -- 48
+pH1, pW1 :: Int           
+pH1 = outH1 `div` 2      
+pW1 = outW1 `div` 2       
 
-after_conv2_h, after_conv2_w :: Int
-after_conv2_h = after_pool1_h - conv2KernelSize + 1  
-after_conv2_w = after_pool1_w - conv2KernelSize + 1  -- 46
+outH2, outW2 :: Int      
+outH2 = pH1 - k2 + 1    
+outW2 = pW1 - k2 + 1   
 
-after_pool2_h, after_pool2_w :: Int
-after_pool2_h = after_conv2_h `div` 2  
-after_pool2_w = after_conv2_w `div` 2  -- 23
+pH2, pW2 :: Int       
+pH2 = outH2 `div` 2  
+pW2 = outW2 `div` 2 
 
-flatSize :: Int
-flatSize = after_pool2_h * after_pool2_w * conv2Filters  -- 8464
+flatSz :: Int
+flatSz = pH2 * pW2 * c2F    
 
 data Network = Network
-  { convW1  :: [ConvFilter]    
-  , convB1  :: Vector         
-  , convW2  :: [[ConvFilter]]
-  , convB2  :: Vector       
-  , wHidden :: Matrix      
-  , bHidden :: Vector     
-  , wOutput :: Matrix          
-  , bOutput :: Vector         
+  { nConvW1  :: U.Vector Double  
+  , nConvB1  :: U.Vector Double 
+  , nConvW2  :: U.Vector Double  
+  , nConvB2  :: U.Vector Double 
+  , nWHid    :: U.Vector Double  
+  , nBHid    :: U.Vector Double 
+  , nWOut    :: U.Vector Double
+  , nBOut    :: U.Vector Double  
   } deriving (Show, Generic)
 
-instance Binary Network
+instance Binary Network where
+  put n = do
+    put (U.toList (nConvW1 n)); put (U.toList (nConvB1 n))
+    put (U.toList (nConvW2 n)); put (U.toList (nConvB2 n))
+    put (U.toList (nWHid   n)); put (U.toList (nBHid   n))
+    put (U.toList (nWOut   n)); put (U.toList (nBOut   n))
+  get = do
+    cw1 <- U.fromList <$> get; cb1 <- U.fromList <$> get
+    cw2 <- U.fromList <$> get; cb2 <- U.fromList <$> get
+    wh  <- U.fromList <$> get; bh  <- U.fromList <$> get
+    wo  <- U.fromList <$> get; bo  <- U.fromList <$> get
+    return (Network cw1 cb1 cw2 cb2 wh bh wo bo)
 
-chunksOf :: Int -> [a] -> [[a]]
-chunksOf _ [] = []
-chunksOf n xs = take n xs : chunksOf n (drop n xs)
 
 initRandomNetwork :: StdGen -> Network
 initRandomNetwork gen =
-  let (g1,r1) = split gen
-      (g2,r2) = split r1
-      (g3,r3) = split r2
-      (g4,_)  = split r3
+  let (g1,r1) = split gen; (g2,r2) = split r1
+      (g3,r3) = split r2;  (g4,_)  = split r3
 
-      -- хавьер бля: limit = sqrt(6 / (fan_in + fan_out))
-      scale1 = sqrt (6.0 / fromIntegral (conv1KernelSize * conv1KernelSize + conv1Filters))
-      scale2 = sqrt (6.0 / fromIntegral (conv2KernelSize * conv2KernelSize * conv1Filters + conv2Filters))
-      scale3 = sqrt (6.0 / fromIntegral (flatSize + fc1Size))
-      scale4 = sqrt (6.0 / fromIntegral (fc1Size + numClasses))
+      xav n m = sqrt (6.0 / fromIntegral (n + m))
 
-      rw1 = randomRs (-scale1, scale1) g1
-      rw2 = randomRs (-scale2, scale2) g2
-      rw3 = randomRs (-scale3, scale3) g3
-      rw4 = randomRs (-scale4, scale4) g4
+      s1 = xav (k1*k1)        c1F
+      s2 = xav (k2*k2*c1F)    c2F
+      s3 = xav flatSz          fc1
+      s4 = xav fc1             nCls
 
-      k1sz = conv1KernelSize * conv1KernelSize
-      k2sz = conv2KernelSize * conv2KernelSize
+      take' n s g = U.fromList . take n $ randomRs (-s, s) g
 
-      cw1 = [ chunksOf conv1KernelSize
-                (take k1sz (drop (i * k1sz) rw1))
-            | i <- [0 .. conv1Filters - 1] ]
-      cb1 = replicate conv1Filters 0.0
-
-      cw2 = [ [ chunksOf conv2KernelSize
-                  (take k2sz (drop ((fi * conv1Filters + ci) * k2sz) rw2))
-              | ci <- [0 .. conv1Filters - 1] ]
-            | fi <- [0 .. conv2Filters - 1] ]
-      cb2 = replicate conv2Filters 0.0
-
-      wH = chunksOf flatSize (take (fc1Size * flatSize) rw3)
-      bH = replicate fc1Size 0.0
-
-      -- output
-      wO = chunksOf fc1Size (take (numClasses * fc1Size) rw4)
-      bO = replicate numClasses 0.0
-
-  in Network cw1 cb1 cw2 cb2 wH bH wO bO
-
-dot :: Vector -> Vector -> Double
-dot xs ys = sum (zipWith (*) xs ys)
-
-layerForward :: Matrix -> Vector -> Vector -> Vector
-layerForward ws inp b = zipWith (+) (map (`dot` inp) ws) b
+  in Network
+       { nConvW1 = take' (c1F * k1*k1)       s1 g1
+       , nConvB1 = U.replicate c1F 0.0
+       , nConvW2 = take' (c2F * c1F * k2*k2) s2 g2
+       , nConvB2 = U.replicate c2F 0.0
+       , nWHid   = take' (fc1 * flatSz)       s3 g3
+       , nBHid   = U.replicate fc1 0.0
+       , nWOut   = take' (nCls * fc1)         s4 g4
+       , nBOut   = U.replicate nCls 0.0
+       }
 
 relu :: Double -> Double
-relu x = max 0.0 x
+relu x = if x > 0 then x else 0
 
-softMax :: Vector -> Vector
-softMax xs =
-  let m    = maximum xs
-      exps = map (\x -> exp (x - m)) xs
-      s    = sum exps
-  in map (/ s) exps
+softMax :: UVec -> UVec
+softMax v =
+  let m = U.maximum v
+      e = U.map (\x -> exp (x - m)) v
+      s = U.sum e
+  in U.map (/ s) e
 
-argMax :: Vector -> Int
-argMax xs =
-  fst $ foldl1 (\(im,vm) (i,v) -> if v > vm then (i,v) else (im,vm))
-               (zip [0..] xs)
+dot :: UVec -> UVec -> Double
+dot a b = U.sum (U.zipWith (*) a b)
 
--- свертыч 
+layerForward :: UMat -> UVec -> UVec -> UVec
+layerForward (rows, cols, ws) inp bias =
+  U.generate rows $ \i ->
+    let row = U.slice (i * cols) cols ws
+    in dot row inp + bias ! i
 
-conv2dSingle :: ConvFilter -> FeatureMap -> FeatureMap
-conv2dSingle kernel fm =
-  let kH   = length kernel
-      kW   = length (head kernel)
-      outH = length fm - kH + 1
-      outW = length (head fm) - kW + 1
-  in [ [ sumPatch kH kW r c | c <- [0 .. outW - 1] ]
-     | r <- [0 .. outH - 1] ]
-  where
-    sumPatch kH kW r c =
-      sum [ (kernel !! kr !! kc) * (fm !! (r + kr) !! (c + kc))
-          | kr <- [0 .. kH - 1]
-          , kc <- [0 .. kW - 1] ]
+argMax :: UVec -> Int
+argMax v = U.maxIndex v
 
-conv2d :: [ConvFilter] -> [FeatureMap] -> Double -> FeatureMap
-conv2d kernels inputs bias =
-  let partials = zipWith conv2dSingle kernels inputs
-      addFM    = zipWith (zipWith (+))
-      summed   = foldl1 addFM partials
-  in map (map (+ bias)) summed
+fmGet :: FMap -> Int -> Int -> Double
+fmGet (_, w, d) r c = d ! (r * w + c)
+{-# INLINE fmGet #-}
 
-applyFilters :: [[ConvFilter]] -> Vector -> [FeatureMap] -> [FeatureMap]
-applyFilters convWs biases inputs =
-  zipWith (\ks b -> conv2d ks inputs b) convWs biases
+mkFMap :: Int -> Int -> UVec -> FMap
+mkFMap h w v = (h, w, v)
 
-maxPool2x2 :: FeatureMap -> FeatureMap
-maxPool2x2 fm =
-  let outH = length fm `div` 2
-      outW = length (head fm) `div` 2
-  in [ [ maximum [ fm !! (r*2 + dr) !! (c*2 + dc)
-                 | dr <- [0,1], dc <- [0,1] ]
-       | c <- [0 .. outW - 1] ]
-     | r <- [0 .. outH - 1] ]
+fmapAdd :: FMap -> FMap -> FMap
+fmapAdd (h,w,a) (_,_,b) = (h, w, U.zipWith (+) a b)
 
-flatten :: [FeatureMap] -> Vector
-flatten = concatMap concat
+zeroFMap :: Int -> Int -> FMap
+zeroFMap h w = (h, w, U.replicate (h*w) 0.0)
 
-predict :: Network -> Vector -> Vector
-predict net input =
-  let inputFM   = chunksOf imgW input
+chunksToFMap :: Int -> Int -> UVec -> FMap
+chunksToFMap h w v = (h, w, v)
 
-      conv1Raw  = applyFilters (map (: []) (convW1 net)) (convB1 net) [inputFM]
-      relu1     = map (map (map relu)) conv1Raw
-      pool1     = map maxPool2x2 relu1          
+conv2dSingle :: Int -> Int  
+             -> UVec       
+             -> FMap      
+             -> FMap     
+conv2dSingle kH kW kernel (inH, inW, inp) =
+  let !outH = inH - kH + 1
+      !outW = inW - kW + 1
+      !n    = outH * outW
+      v = U.generate n $ \idx ->
+            let !r  = idx `div` outW
+                !c  = idx `mod` outW
+            in U.sum $ U.generate (kH * kW) $ \kid ->
+                 let !kr = kid `div` kW
+                     !kc = kid `mod` kW
+                 in (kernel ! kid) * (inp ! ((r+kr)*inW + (c+kc)))
+  in (outH, outW, v)
 
-      conv2Raw  = applyFilters (convW2 net) (convB2 net) pool1
-      relu2     = map (map (map relu)) conv2Raw
-      pool2     = map maxPool2x2 relu2          -- 23×23×16
+conv2dMulti :: Int -> Int   
+            -> [UVec]      
+            -> [FMap]     
+            -> Double    
+            -> FMap
+conv2dMulti kH kW kernels inputs bias =
+  let partials = zipWith (conv2dSingle kH kW) kernels inputs
+      (h, w, _) = head partials
+      summed = foldl1 (\(_,_,a) (_,_,b) -> (h, w, U.zipWith (+) a b)) partials
+      (_, _, sv) = summed
+  in (h, w, U.map (+ bias) sv)
 
-      flatVec    = flatten pool2                 -- 8464
-      hiddenRaw  = layerForward (wHidden net) flatVec (bHidden net)
-      hiddenAct  = map relu hiddenRaw
-      outputRaw  = layerForward (wOutput net) hiddenAct (bOutput net)
-  in softMax outputRaw
+applyConv1 :: Network -> FMap -> [FMap]
+applyConv1 net inputFM =
+  [ let !off    = fi * k1*k1
+        !kernel = U.slice off (k1*k1) (nConvW1 net)
+        !bias   = nConvB1 net ! fi
+        (h, w, sv) = conv2dSingle k1 k1 kernel inputFM
+    in (h, w, U.map (+ bias) sv)
+  | fi <- [0 .. c1F - 1] ]
+
+applyConv2 :: Network -> [FMap] -> [FMap]
+applyConv2 net pool1 =
+  [ let kernels = [ U.slice ((fi*c1F + ci) * k2*k2) (k2*k2) (nConvW2 net)
+                  | ci <- [0..c1F-1] ]
+        !bias   = nConvB2 net ! fi
+    in conv2dMulti k2 k2 kernels pool1 bias
+  | fi <- [0 .. c2F - 1] ]
+
+applyFilters :: Network -> [FMap] -> [FMap]
+applyFilters = applyConv2
+
+
+maxPool2x2 :: FMap -> FMap
+maxPool2x2 (inH, inW, inp) =
+  let !outH = inH `div` 2
+      !outW = inW `div` 2
+      v = U.generate (outH * outW) $ \idx ->
+            let !r = idx `div` outW
+                !c = idx `mod` outW
+            in max (max (inp ! ((r*2)  *inW + c*2))
+                        (inp ! ((r*2)  *inW + c*2+1)))
+                   (max (inp ! ((r*2+1)*inW + c*2))
+                        (inp ! ((r*2+1)*inW + c*2+1)))
+  in (outH, outW, v)
+
+flatten :: [FMap] -> UVec
+flatten fmaps = U.concat [ v | (_,_,v) <- fmaps ]
+
+predict :: Network -> Vector -> UVec
+predict net inputList =
+  let inputVec = U.fromList inputList
+      inputFM  = (imgH, imgW, inputVec)
+
+      conv1    = applyConv1 net inputFM
+      relu1    = map (\(h,w,v) -> (h,w, U.map relu v)) conv1
+      pool1    = map maxPool2x2 relu1
+
+      conv2    = applyConv2 net pool1
+      relu2    = map (\(h,w,v) -> (h,w, U.map relu v)) conv2
+      pool2    = map maxPool2x2 relu2
+
+      flatVec  = flatten pool2
+      hidRaw   = layerForward (fc1, flatSz, nWHid net) flatVec (nBHid net)
+      hidAct   = U.map relu hidRaw
+      outRaw   = layerForward (nCls, fc1, nWOut net) hidAct (nBOut net)
+  in softMax outRaw

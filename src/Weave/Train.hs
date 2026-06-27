@@ -1,160 +1,217 @@
+{-# LANGUAGE BangPatterns #-}
+
 module Weave.Train (trainStep, trainEpoch, reluDerivative) where
 
-import Weave.Base
-import Data.List (transpose, maximumBy)
-import Data.Ord  (comparing)
+import qualified Data.Vector.Unboxed         as U
+import qualified Data.Vector.Unboxed.Mutable as MU
+import           Data.Vector.Unboxed         ((!))
+import           Control.Monad               (forM_)
+import           Control.Monad.ST            (runST)
 
-learningRate :: Double
-learningRate = 1e-4
+import Weave.Base
+
+lr :: Double
+lr = 1e-4
 
 reluDerivative :: Double -> Double
 reluDerivative x = if x > 0 then 1.0 else 0.0
 
-addFM :: FeatureMap -> FeatureMap -> FeatureMap
-addFM = zipWith (zipWith (+))
+applyGrad :: UVec -> UVec -> UVec
+applyGrad params grads = U.zipWith (\p g -> p - lr * g) params grads
 
-zeroFM :: Int -> Int -> FeatureMap
-zeroFM h w = replicate h (replicate w 0.0)
+maxPool2x2Fwd :: FMap -> (FMap, U.Vector Int)
+maxPool2x2Fwd (inH, inW, inp) =
+  let !outH = inH `div` 2
+      !outW = inW `div` 2
+      !n    = outH * outW
+      (vals, idxs) = U.unzip $ U.generate n $ \i ->
+        let !r  = i `div` outW
+            !c  = i `mod` outW
+            candidates = [ (inp ! ((r*2+dr)*inW + c*2+dc), (r*2+dr)*inW + c*2+dc)
+                         | dr <- [0,1], dc <- [0,1] ]
+            (v, idx) = foldl1 (\a b -> if fst a >= fst b then a else b) candidates
+        in (v, idx)
+  in ((outH, outW, vals), idxs)
 
-updateV :: Vector -> Vector -> Vector
-updateV = zipWith (\old g -> old - learningRate * g)
+maxPoolBwd :: U.Vector Int  
+           -> FMap         
+           -> Int -> Int  
+           -> FMap
+maxPoolBwd mask (outH, outW, dOut) inH inW = runST $ do
+  mv <- MU.replicate (inH * inW) 0.0
+  forM_ [0 .. outH*outW - 1] $ \i -> do
+    let !g   = dOut ! i
+        !idx = mask ! i
+    old <- MU.read mv idx
+    MU.write mv idx (old + g)
+  v <- U.freeze mv
+  return (inH, inW, v)
 
-updateM :: Matrix -> Matrix -> Matrix
-updateM = zipWith (zipWith (\old g -> old - learningRate * g))
+gradKernel :: Int -> Int 
+           -> FMap        
+           -> FMap      
+           -> UVec     
+gradKernel kH kW (_, inW, inp) (outH, outW, dOut) =
+  U.generate (kH * kW) $ \kid ->
+    let !kr = kid `div` kW
+        !kc = kid `mod` kW
+    in U.sum $ U.generate (outH * outW) $ \i ->
+         let !r = i `div` outW
+             !c = i `mod` outW
+         in (dOut ! i) * (inp ! ((r+kr)*inW + (c+kc)))
 
-updateFM :: FeatureMap -> FeatureMap -> FeatureMap
-updateFM = zipWith (zipWith (\old g -> old - learningRate * g))
-
-
-maxPool2x2Fwd :: FeatureMap -> (FeatureMap, [((Int,Int),(Int,Int))])
-maxPool2x2Fwd fm =
-  let outH  = length fm `div` 2
-      outW  = length (head fm) `div` 2
-      cells = [ let cands = [ (fm !! (r*2+dr) !! (c*2+dc), (r*2+dr, c*2+dc))
-                             | dr <- [0,1], dc <- [0,1] ]
-                    (val, pos) = maximumBy (comparing fst) cands
-                in (val, (pos, (r,c)))
-              | r <- [0..outH-1], c <- [0..outW-1] ]
-  in (chunksOf outW (map fst cells), map snd cells)
-
-maxPoolBwd :: [((Int,Int),(Int,Int))] -> FeatureMap -> Int -> Int -> FeatureMap
-maxPoolBwd masks dOut inH inW =
-  foldl step (zeroFM inH inW) masks
-  where
-    step acc ((ri,ci),(ro,co)) =
-      let g   = dOut !! ro !! co
-          row = acc !! ri
-          row' = take ci row ++ [(row !! ci) + g] ++ drop (ci+1) row
-      in take ri acc ++ [row'] ++ drop (ri+1) acc
-
-
-gradKernel :: FeatureMap -> FeatureMap -> ConvFilter
-gradKernel inputFM dOut =
-  let outH = length dOut
-      outW = length (head dOut)
-      kH   = length inputFM - outH + 1
-      kW   = length (head inputFM) - outW + 1
-  in [ [ sum [ dOut !! r !! c * inputFM !! (r+kr) !! (c+kc)
-             | r <- [0..outH-1], c <- [0..outW-1] ]
-       | kc <- [0..kW-1] ]
-     | kr <- [0..kH-1] ]
-
-
-gradInput :: ConvFilter -> FeatureMap -> FeatureMap
-gradInput kernel dOut =
-  let kH      = length kernel
-      kW      = length (head kernel)
-      oH      = length dOut
-      oW      = length (head dOut)
-      pH      = kH - 1
-      pW      = kW - 1
-      padded  = [ [ if r >= pH && r < pH+oH && c >= pW && c < pW+oW
-                    then dOut !! (r-pH) !! (c-pW)
+gradInput :: Int -> Int  
+          -> UVec       
+          -> FMap      
+          -> FMap     
+gradInput kH kW kernel (outH, outW, dOut) =
+  let !pH  = kH - 1
+      !pW  = kW - 1
+      !_ = outH + 2*pH
+      !_ = outW + 2*pW
+      flipped = U.reverse kernel
+      !inH = outH + kH - 1
+      !inW = outW + kW - 1
+      v = U.generate (inH * inW) $ \idx ->
+            let !r = idx `div` inW
+                !c = idx `mod` inW
+            in U.sum $ U.generate (kH * kW) $ \kid ->
+                 let !kr  = kid `div` kW
+                     !kc  = kid `mod` kW
+                     !pr  = r + pH - kr  
+                     !pc  = c + pW - kc
+                 in if pr >= 0 && pr < outH && pc >= 0 && pc < outW
+                    then (flipped ! kid) * (dOut ! (pr*outW + pc))
                     else 0.0
-                  | c <- [0..oW+2*pW-1] ]
-                | r <- [0..oH+2*pH-1] ]
-      flipped = map reverse (reverse kernel)
-  in conv2dSingle flipped padded
+  in (inH, inW, v)
 
 trainStep :: Network -> Vector -> Int -> Network
-trainStep net input targetIdx =
+trainStep net inputList targetIdx =
   let
+    inputVec = U.fromList inputList
+    inputFM  = (imgH, imgW, inputVec)
 
-    inputFM  = chunksOf imgW input                              
+    conv1Raw = applyConv1' net inputFM        
+    relu1    = mapFM relu conv1Raw
+    (pool1, mask1) = unzip (map maxPool2x2Fwd relu1)  
 
-    conv1Raw = applyFilters (map (:[]) (convW1 net)) (convB1 net) [inputFM]
-    relu1    = map (map (map relu)) conv1Raw
-    (pool1, mask1) = unzip (map maxPool2x2Fwd relu1)
+    conv2Raw = applyConv2' net pool1          
+    relu2    = mapFM relu conv2Raw
+    (pool2, mask2) = unzip (map maxPool2x2Fwd relu2) 
 
-    conv2Raw = applyFilters (convW2 net) (convB2 net) pool1
-    relu2    = map (map (map relu)) conv2Raw
-    (pool2, mask2) = unzip (map maxPool2x2Fwd relu2)
+    flatVec  = flatten pool2                        
+    hidRaw   = layerForward (fc1, flatSz, nWHid net) flatVec (nBHid net)
+    hidAct   = U.map relu hidRaw
+    outRaw   = layerForward (nCls, fc1, nWOut net) hidAct (nBOut net)
+    outAct   = softMax outRaw
 
-    -- FC
-    flatVec   = flatten pool2                                   -- 8464
-    hidRaw    = layerForward (wHidden net) flatVec (bHidden net)
-    hidAct    = map relu hidRaw
-    outRaw    = layerForward (wOutput net) hidAct (bOutput net)
-    outAct    = softMax outRaw
 
-    -- backprog 
+    target = U.generate nCls (\i -> if i == targetIdx then 1.0 else 0.0)
+    dOut   = U.zipWith (-) outAct target              
 
-    target  = [if i == targetIdx then 1.0 else 0.0 | i <- [0..numClasses-1]]
-    dOut    = zipWith (-) outAct target                         -- [10]
-
-    dwOut = [[d * h | h <- hidAct] | d <- dOut]
+    dwOut = outerProd dOut hidAct                      
     dbOut = dOut
 
-    -- - hidAct -> hidRaw
-    dHidAct = map (`dot` dOut) (transpose (wOutput net))
-    dHidRaw = zipWith (*) dHidAct (map reluDerivative hidRaw)
+    dHidAct = matVecT (nCls, fc1, nWOut net) dOut       
+    dHidRaw = U.zipWith (*) dHidAct (U.map reluDerivative hidRaw)
 
-    -- FC1
-    dwHid = [[d * f | f <- flatVec] | d <- dHidRaw]
+    dwHid = outerProd dHidRaw flatVec                   
     dbHid = dHidRaw
 
-    dFlatCh  = chunksOf (after_pool2_h * after_pool2_w)
-                 (map (`dot` dHidRaw) (transpose (wHidden net)))
-    dPool2FM = map (chunksOf after_pool2_w) dFlatCh             
+    dFlatVec = matVecT (fc1, flatSz, nWHid net) dHidRaw 
 
-    dRelu2 = zipWith (\dP mk -> maxPoolBwd mk dP after_conv2_h after_conv2_w)
-                     dPool2FM mask2
+    dPool2 = splitFMaps c2F pH2 pW2 dFlatVec
 
-    dConv2 = zipWith (\dR rC -> zipWith (zipWith (*)) dR (map (map reluDerivative) rC))
+    dRelu2 = zipWith (\dP mk -> maxPoolBwd mk dP outH2 outW2) dPool2 mask2
+
+    dConv2 = zipWith (\(h,w,dr) (_, _, rc) ->
+                        (h, w, U.zipWith (*) dr (U.map reluDerivative rc)))
                      dRelu2 conv2Raw
 
-    dwConv2 = [ [ gradKernel (pool1 !! ci) (dConv2 !! fi)
-                | ci <- [0..conv1Filters-1] ]
-              | fi <- [0..conv2Filters-1] ]
-    dbConv2 = map (\fm -> sum (map sum fm)) dConv2
+    dwConv2 = U.concat
+      [ U.concat
+        [ gradKernel k2 k2 (pool1 !! ci) (dConv2 !! fi)
+        | ci <- [0..c1F-1] ]
+      | fi <- [0..c2F-1] ]
+    dbConv2 = U.fromList [ let (_,_,v) = dConv2 !! fi in U.sum v | fi <- [0..c2F-1] ]
 
-    dPool1FM = [ foldl addFM (zeroFM after_pool1_h after_pool1_w)
-                   [ gradInput (convW2 net !! fi !! ci) (dConv2 !! fi)
-                   | fi <- [0..conv2Filters-1] ]
-               | ci <- [0..conv1Filters-1] ]
+    dPool1 = [ foldl1 fmapAdd
+                 [ gradInput k2 k2
+                     (sliceKernel2 fi ci) (dConv2 !! fi)
+                 | fi <- [0..c2F-1] ]
+             | ci <- [0..c1F-1] ]
+      where sliceKernel2 fi ci =
+              U.slice ((fi*c1F + ci)*k2*k2) (k2*k2) (nConvW2 net)
 
-    dRelu1 = zipWith (\dP mk -> maxPoolBwd mk dP after_conv1_h after_conv1_w)
-                     dPool1FM mask1
+    dRelu1 = zipWith (\dP mk -> maxPoolBwd mk dP outH1 outW1) dPool1 mask1
 
-    dConv1 = zipWith (\dR rC -> zipWith (zipWith (*)) dR (map (map reluDerivative) rC))
+    dConv1 = zipWith (\(h,w,dr) (_,_, rc) ->
+                        (h, w, U.zipWith (*) dr (U.map reluDerivative rc)))
                      dRelu1 conv1Raw
 
-    dwConv1 = [ gradKernel inputFM (dConv1 !! fi)
-              | fi <- [0..conv1Filters-1] ]
-    dbConv1 = map (\fm -> sum (map sum fm)) dConv1
+    dwConv1 = U.concat
+      [ gradKernel k1 k1 inputFM (dConv1 !! fi)
+      | fi <- [0..c1F-1] ]
+    dbConv1 = U.fromList [ let (_,_,v) = dConv1 !! fi in U.sum v | fi <- [0..c1F-1] ]
 
 
   in Network
-       { convW1  = zipWith updateFM (convW1 net) dwConv1
-       , convB1  = updateV  (convB1 net) dbConv1
-       , convW2  = zipWith (zipWith updateFM) (convW2 net) dwConv2
-       , convB2  = updateV  (convB2 net) dbConv2
-       , wHidden = updateM  (wHidden net) dwHid
-       , bHidden = updateV  (bHidden net) dbHid
-       , wOutput = updateM  (wOutput net) dwOut
-       , bOutput = updateV  (bOutput net) dbOut
+       { nConvW1 = applyGrad (nConvW1 net) dwConv1
+       , nConvB1 = applyGrad (nConvB1 net) dbConv1
+       , nConvW2 = applyGrad (nConvW2 net) dwConv2
+       , nConvB2 = applyGrad (nConvB2 net) dbConv2
+       , nWHid   = applyGrad (nWHid   net) dwHid
+       , nBHid   = applyGrad (nBHid   net) dbHid
+       , nWOut   = applyGrad (nWOut   net) dwOut
+       , nBOut   = applyGrad (nBOut   net) dbOut
        }
+
+mapFM :: (Double -> Double) -> [FMap] -> [FMap]
+mapFM f = map (\(h,w,v) -> (h, w, U.map f v))
+
+outerProd :: UVec -> UVec -> UVec
+outerProd a b =
+  let !na = U.length a
+      !nb = U.length b
+  in U.generate (na * nb) (\i -> (a ! (i `div` nb)) * (b ! (i `mod` nb)))
+
+matVecT :: UMat -> UVec -> UVec
+matVecT (rows, cols, ws) v = runST $ do
+  res <- MU.replicate cols 0.0
+  forM_ [0..rows-1] $ \i -> do
+    let !vi = v ! i
+    forM_ [0..cols-1] $ \j -> do
+      old <- MU.read res j
+      MU.write res j (old + (ws ! (i*cols+j)) * vi)
+  U.freeze res
+
+splitFMaps :: Int -> Int -> Int -> UVec -> [FMap]
+splitFMaps n h w v =
+  [ let !off = i * h * w
+    in (h, w, U.slice off (h*w) v)
+  | i <- [0..n-1] ]
+
+applyConv1' :: Network -> FMap -> [FMap]
+applyConv1' net inputFM =
+  [ let !off    = fi * k1*k1
+        !kernel = U.slice off (k1*k1) (nConvW1 net)
+        !bias   = nConvB1 net ! fi
+        (h, w, sv) = conv2dSingle k1 k1 kernel inputFM
+    in (h, w, U.map (+ bias) sv)
+  | fi <- [0..c1F-1] ]
+
+applyConv2' :: Network -> [FMap] -> [FMap]
+applyConv2' net pool1 =
+  [ let kernels = [ U.slice ((fi*c1F + ci)*k2*k2) (k2*k2) (nConvW2 net)
+                  | ci <- [0..c1F-1] ]
+        !bias   = nConvB2 net ! fi
+        partials = [ conv2dSingle k2 k2 kg fm | (kg,fm) <- zip kernels pool1 ]
+        (h, w, _) = head partials
+        sumv = foldl1 (\(_,_,a) (_,_,b) -> (h,w,U.zipWith (+) a b)) partials
+        (_,_,sv) = sumv
+    in (h, w, U.map (+ bias) sv)
+  | fi <- [0..c2F-1] ]
 
 
 trainEpoch :: Network -> [Image] -> Network
-trainEpoch = foldl (\net (img, lbl) -> trainStep net img lbl)
+trainEpoch = foldl' (\net (img, lbl) -> trainStep net img lbl)
