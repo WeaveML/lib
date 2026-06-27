@@ -18,21 +18,21 @@ main = do
   
   case cmd of
     Train numEpochs outputPath -> do
-      putStr "Generation datasets... "
+      putStrLn "Generation datasets... "
       trainDataset <- generateDataset 150 0.4
       testDataset  <- generateDataset 30 0.25
       
       gen <- newStdGen
       let initialNet = initRandomNetwork gen
       
-      putStr "Training... "
+      putStrLn "Training... "
       finalNet <- foldlMSteps initialNet [1..numEpochs] numEpochs trainDataset testDataset
       
       printf "\nSaving model: %s... " outputPath
       saveModel finalNet outputPath 
 
     Predict modelPath imgPath -> do
-      putStr $ "Model: " ++ modelPath ++ "... "
+      putStrLn $ "Model: " ++ modelPath ++ "... "
       net <- loadModel modelPath :: IO Network
       
       rawBytes <- B.readFile imgPath
