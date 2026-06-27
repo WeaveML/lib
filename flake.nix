@@ -20,6 +20,11 @@
             pkgs.git
             pkgs.zlib
             pkgs.pkg-config
+            pkgs.python3
+            pkgs.python313Packages.pillow
+            pkgs.python313Packages.albumentations
+            pkgs.python313Packages.numpy
+            pkgs.python313Packages.opencv-python
           ];
         };
 
