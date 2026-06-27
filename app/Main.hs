@@ -19,8 +19,8 @@ main = do
   case cmd of
     Train numEpochs outputPath -> do
       putStr "Generation datasets... "
-      trainDataset <- generateDataset 1500 1 
-      testDataset  <- generateDataset 300 0.25
+      trainDataset <- generateDataset 150 0.4
+      testDataset  <- generateDataset 30 0.25
       
       gen <- newStdGen
       let initialNet = initRandomNetwork gen
@@ -36,8 +36,8 @@ main = do
       net <- loadModel modelPath :: IO Network
       
       rawBytes <- B.readFile imgPath
-      if B.length rawBytes /= 784
-        then error $ printf "Error: expected (28x28) 784b, found %db file." (B.length rawBytes)
+      if B.length rawBytes /= 10000
+        then error $ printf "Error: expected (100x100) 10kb, found %db file." (B.length rawBytes)
         else do
           let inputVector = map (\b -> fromIntegral b / 255.0) (B.unpack rawBytes)
           
